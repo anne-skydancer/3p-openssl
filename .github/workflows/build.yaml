@@ -51,7 +51,7 @@ jobs:
         shell: bash
         run: |
           archive=$(ls *.tar.zst)
-          python -c "import sys, tarfile; names = tarfile.open(sys.argv[1], 'r:zst').getnames(); missing = [n for n in sys.argv[2:] if n not in names]; sys.exit('missing: %s' % missing if missing else 0)" \
+          python -c "import io, sys, tarfile, zstandard; names = tarfile.open(fileobj=io.BytesIO(zstandard.ZstdDecompressor().decompressobj().decompress(open(sys.argv[1], 'rb').read()))).getnames(); missing = [n for n in sys.argv[2:] if n not in names]; sys.exit('missing: %s' % missing if missing else 0)" \
             "$archive" LICENSES/openssl.txt autobuild-package.xml include/openssl/provider.h \
             $([ "${{ matrix.platform }}" = windows64 ] && echo lib/release/libcrypto.lib lib/release/libssl.lib || echo lib/release/libcrypto.a lib/release/libssl.a)
           sha256sum "$archive" | tee -a "$GITHUB_STEP_SUMMARY"
