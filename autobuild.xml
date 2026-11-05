@@ -213,21 +213,19 @@
         </map>
       </map>
       <key>license</key>
-      <string>openssl</string>
+      <string>Apache-2.0</string>
       <key>license_file</key>
       <string>LICENSES/openssl.txt</string>
       <key>copyright</key>
-      <string>Copyright (c) 1998-2011 The OpenSSL Project.  All rights reserved; Copyright (C) 1995-1998 Eric Young (eay@cryptsoft.com)</string>
-      <key>use_scm_version</key>
-      <boolean>true</boolean>
+      <string>Copyright (c) 1998-2026 The OpenSSL Project Authors; Copyright (c) 1995-1998 Eric A. Young, Tim J. Hudson</string>
+      <key>version_file</key>
+      <string>VERSION.txt</string>
       <key>name</key>
       <string>openssl</string>
       <key>canonical_repo</key>
-      <string>https://github.com/secondlife/3p-openssl</string>
+      <string>https://github.com/anne-skydancer/3p-openssl</string>
       <key>description</key>
-      <string>Secure Sockets Layer (SSL v2/v3) and Transport Layer Security (TLS v1) Library</string>
-      <key>source_directory</key>
-      <string>openssl</string>
+      <string>OpenSSL 3.5 LTS TLS and crypto library, static, legacy provider built in (Vulkanstorm build)</string>
     </map>
   </map>
 </llsd>

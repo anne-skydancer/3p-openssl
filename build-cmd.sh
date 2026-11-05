@@ -1,4 +1,19 @@
 #!/usr/bin/env bash
+# Builds OpenSSL 3.5 LTS as a static autobuild package for Vulkanstorm.
+#
+# Changes against secondlife/3p-openssl (1.1.1w):
+#   - source: the signed OpenSSL release tarball, SHA-256 pinned below, instead
+#     of the git submodule (the tarball is what was verified against the
+#     release signature; see README.md);
+#   - Configure adds 'no-module': the legacy provider (RC4, needed for the
+#     viewer's bin_conf.dat) is compiled into libcrypto instead of being a
+#     legacy.dll/legacy.so the viewer would have to stage and locate;
+#   - Windows keeps OpenSSL's own /nologo /W3 /wd4090, which a CFLAGS
+#     environment variable otherwise replaces, and uses jom when present;
+#   - a smoke test runs the built openssl binary: the legacy provider must be
+#     built in and active, and RC4 must give the known answer through it.
+# Everything else (zlib-ng linkage, threads, static libraries, the layout of
+# stage/) is as in LL's script.
 
 cd "$(dirname "$0")"
 
@@ -18,6 +33,10 @@ if [[ "$OSTYPE" == "cygwin" || "$OSTYPE" == "msys" ]] ; then
 else
     autobuild="$AUTOBUILD"
 fi
+
+OPENSSL_VERSION="3.5.9"
+OPENSSL_SHA256="603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a"
+OPENSSL_URL="https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz"
 
 # Restore all .sos
 restore_sos ()
@@ -40,6 +59,33 @@ restore_dylibs ()
     done
 }
 
+sha256_of ()
+{
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | cut -d' ' -f1
+    else
+        shasum -a 256 "$1" | cut -d' ' -f1
+    fi
+}
+
+# The built openssl binary ($1) must list the legacy provider as active
+# (compiled into libcrypto by 'no-module') and give RC4's known answer
+# through it: RC4, key 00..0f, "vulkanstorm" (checked against a textbook RC4).
+smoke_test ()
+{
+    local exe="$1"
+    "$exe" version -a
+    local providers
+    providers="$("$exe" list -providers -provider default -provider legacy | tr -d '\r')"
+    echo "$providers"
+    echo "$providers" | grep -A3 '^  legacy' | grep -q 'status: active' \
+        || { echo "legacy provider is not built in" 1>&2; exit 1; }
+    local rc4
+    rc4="$(printf 'vulkanstorm' | "$exe" enc -rc4 -K 000102030405060708090a0b0c0d0e0f \
+               -provider legacy -provider default | od -An -tx1 | tr -d ' \n\r')"
+    [ "$rc4" = "9fe92c92268c6ab869a9fa" ] || { echo "RC4 known-answer test failed: $rc4" 1>&2; exit 1; }
+}
+
 top="$(pwd)"
 stage="$top/stage"
 
@@ -54,7 +100,27 @@ source_environment_tempfile="$stage/source_environment.sh"
 # remove_cxxstd
 source "$(dirname "$AUTOBUILD_VARIABLES_FILE")/functions"
 
-OPENSSL_SOURCE_DIR="openssl"
+# Fetch (or reuse) the release tarball and check it against the pinned digest.
+# OPENSSL_TARBALL may name an already downloaded copy; it is checked the same way.
+mkdir -p "$top/dl"
+tarball="$top/dl/openssl-${OPENSSL_VERSION}.tar.gz"
+if [ -n "${OPENSSL_TARBALL:-}" ]; then
+    cp -f "$OPENSSL_TARBALL" "$tarball"
+elif [ ! -f "$tarball" ]; then
+    curl -sSfL --retry 3 -o "$tarball" "$OPENSSL_URL"
+fi
+actual_sha256="$(sha256_of "$tarball")"
+if [ "$actual_sha256" != "$OPENSSL_SHA256" ]; then
+    echo "SHA-256 mismatch for $tarball: $actual_sha256" 1>&2
+    exit 1
+fi
+
+OPENSSL_SOURCE_DIR="$top/openssl-${OPENSSL_VERSION}"
+rm -rf "$OPENSSL_SOURCE_DIR"
+tar -xzf "$tarball" -C "$top"
+
+# autobuild reads version_file from the build directory
+cp -f "$top/VERSION.txt" "$stage/VERSION.txt"
 
 pushd "$OPENSSL_SOURCE_DIR"
     case "$AUTOBUILD_PLATFORM" in
@@ -62,6 +128,13 @@ pushd "$OPENSSL_SOURCE_DIR"
         windows*)
             # configure won't work with VC-* builds undex cygwin's perl, use window's one
             export PATH="/c/Strawberry/perl/bin:$PATH"
+            # NASM for the assembler modules: winget's per-user install or the machine-wide one
+            for nasmdir in "${LOCALAPPDATA:-}/bin/NASM" "C:/Program Files/NASM"; do
+                if [ -n "$nasmdir" ] && [ -x "$(cygpath -u "$nasmdir")/nasm.exe" ]; then
+                    export PATH="$(cygpath -u "$nasmdir"):$PATH"
+                    break
+                fi
+            done
 
             load_vsvars
 
@@ -81,23 +154,31 @@ pushd "$OPENSSL_SOURCE_DIR"
             # using bash string magic, Configure does pass them through --
             # only to have cl.exe ignore them with extremely verbose warnings!
             # CFLAGS can accept /switches and correctly pass them to cl.exe.
+            # CFLAGS replaces the target's own CFLAGS, so those (/nologo /W3
+            # /wd4090) go in front. /MD from LL_BUILD_RELEASE matters: with
+            # OpenSSL's default /MT, openssl.exe does not link against the /MD
+            # zlib-ng package (__imp__aligned_malloc unresolved).
             opts="$(replace_switch /Zi /Z7 $LL_BUILD_RELEASE)"
             plainopts="$(remove_switch /GR $(remove_cxxstd $opts))"
-            export CFLAGS="$plainopts"
+            export CFLAGS="/nologo /W3 /wd4090 $plainopts"
             export CXXFLAGS="$opts"
 
-            perl Configure "$targetname" zlib no-zlib-dynamic threads no-shared -DUNICODE -D_UNICODE -FS \
+            perl Configure "$targetname" zlib no-zlib-dynamic threads no-shared no-module -DUNICODE -D_UNICODE -FS \
                 --with-zlib-include="$(cygpath -w "$stage/packages/include/zlib-ng")" \
                 --with-zlib-lib="$(cygpath -w "$stage/packages/lib/release/zlib.lib")"
 
-            jom
+            if command -v jom >/dev/null 2>&1; then
+                make_tool=jom
+            else
+                make_tool=nmake
+            fi
+            "$make_tool" -nologo
 
-            # Publish headers
-            mkdir -p "$stage/include/openssl"
+            smoke_test "apps/openssl.exe"
 
             # conditionally run unit tests
             if [ "${DISABLE_UNIT_TESTS:-0}" = "0" ]; then
-                jom test
+                HARNESS_JOBS="${AUTOBUILD_CPU_COUNT:-4}" "$make_tool" -nologo test
             fi
 
             cp -a {libcrypto,libssl}.lib "$stage/lib/release"
@@ -108,15 +189,6 @@ pushd "$OPENSSL_SOURCE_DIR"
         ;;
 
         darwin*)
-            # Install name for dylibs based on major version number
-            # Not clear exactly why Configure/make generates lib*.1.0.0.dylib
-            # for ${major_version}.${minor_version}.${build_version} == 1.0.1,
-            # but obviously we must correctly predict the dylib filenames.
-            # crypto_target_name="libcrypto.${major_version}.${minor_version}.dylib"
-            # crypto_install_name="@executable_path/../Resources/${crypto_target_name}"
-            # ssl_target_name="libssl.${major_version}.${minor_version}.dylib"
-            # ssl_install_name="@executable_path/../Resources/${ssl_target_name}"
-
             # Force static linkage by moving .dylibs out of the way
             trap restore_dylibs EXIT
             for dylib in "$stage/packages/lib"/{debug,release}/*.dylib; do
@@ -168,7 +240,7 @@ pushd "$OPENSSL_SOURCE_DIR"
                     CFLAGS="$cc_opts" \
                     CXXFLAGS="$opts" \
                     LDFLAGS="$ld_opts" \
-                    ../Configure --release zlib no-zlib-dynamic threads no-shared darwin64-"$arch"-cc \
+                    ../Configure --release zlib no-zlib-dynamic threads no-shared no-module darwin64-"$arch"-cc \
                         --prefix="$stage" --libdir="lib/release/$arch" --openssldir="share" \
                         --with-zlib-include="$stage/packages/include/zlib-ng" \
                         --with-zlib-lib="$stage/packages/lib/release" \
@@ -181,19 +253,13 @@ pushd "$OPENSSL_SOURCE_DIR"
                         # this make target.
                         make install_sw
 
-                        # Modify .dylib path information.  Do this after install
-                        # to the copies rather than built or the dylib's will be
-                        # linked again wiping out the install_name.
-                        # crypto_stage_name="${stage}/lib/release/${crypto_target_name}"
-                        # ssl_stage_name="${stage}/lib/release/${ssl_target_name}"
-                        # chmod u+w "${crypto_stage_name}" "${ssl_stage_name}"
-                        # install_name_tool -id "${ssl_install_name}" "${ssl_stage_name}"
-                        # install_name_tool -id "${crypto_install_name}" "${crypto_stage_name}"
-                        # install_name_tool -change "${crypto_stage_name}" "${crypto_install_name}" "${ssl_stage_name}"
+                        if [ "$arch" = "$(uname -m)" ]; then
+                            smoke_test "apps/openssl"
+                        fi
 
                         # conditionally run unit tests
                         if [ "${DISABLE_UNIT_TESTS:-0}" = "0" ]; then
-                            make test
+                            HARNESS_JOBS="$AUTOBUILD_CPU_COUNT" make test
                         fi
 
                         make clean
@@ -242,7 +308,7 @@ pushd "$OPENSSL_SOURCE_DIR"
             # '--openssldir' as well.
             # "shared" means build shared and static, instead of just static.
 
-            ./Configure zlib no-zlib-dynamic threads no-shared "$targetname" "$opts" \
+            ./Configure zlib no-zlib-dynamic threads no-shared no-module "$targetname" "$opts" \
                 --prefix="$stage" --libdir="lib/release" --openssldir="share" \
                 --with-zlib-include="$stage/packages/include/zlib-ng" \
                 --with-zlib-lib="$stage"/packages/lib/release/
@@ -250,22 +316,18 @@ pushd "$OPENSSL_SOURCE_DIR"
             make -j$AUTOBUILD_CPU_COUNT
             make install_sw
 
+            smoke_test "apps/openssl"
+
             # conditionally run unit tests
             if [ "${DISABLE_UNIT_TESTS:-0}" = "0" ]; then
-                make test
+                HARNESS_JOBS="$AUTOBUILD_CPU_COUNT" make test
             fi
 
             make clean
-
-            # By default, 'make install' leaves even the user write bit off.
-            # This causes trouble for us down the road, along about the time
-            # the consuming build tries to strip libraries.  It's easier to
-            # make writable here than fix the viewer packaging.
-            # chmod u+w "$stage"/lib/release/lib{crypto,ssl}.so*
         ;;
     esac
     mkdir -p "$stage/LICENSES"
-    cp -a LICENSE "$stage/LICENSES/openssl.txt"
+    cp -a LICENSE.txt "$stage/LICENSES/openssl.txt"
 popd
 
 mkdir -p "$stage"/docs/openssl/

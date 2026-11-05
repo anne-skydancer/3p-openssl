@@ -2,3 +2,6 @@
 
 # Specific paths and/or names
 stage
+/dl/
+/openssl-*/
+/*.tar.*

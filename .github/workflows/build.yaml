@@ -1,32 +1,90 @@
-name: Build
+name: Build openssl package
 on:
   pull_request:
   push:
-    branches: [main]
-    tags: [v*]
+    branches: ['**']
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  AUTOBUILD_BUILD_ID: ${{ github.run_id }}
+  AUTOBUILD_VSVER: "180"
+  AUTOBUILD_VARIABLES_FILE: ${{ github.workspace }}/.build-variables/variables
 jobs:
-  build:
+  package:
     strategy:
+      fail-fast: false
       matrix:
-        os: [windows-2022, macos-15, ubuntu-22.04]
-        addrsize: ["64"]
+        include:
+          - os: windows-2025
+            platform: windows64
+          - os: ubuntu-26.04
+            platform: linux64
     runs-on: ${{ matrix.os }}
     steps:
-      - name: Setup Chocolatey Packages
-        if: ${{ runner.os == 'Windows' }}
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: FirestormViewer/fs-build-variables
+          path: .build-variables
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install packaging tools
+        run: python -m pip install autobuild==3.10.2 llsd zstandard
+      - name: Install NASM and jom
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           choco install -y nasm jom
-          echo "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          echo "C:\ProgramData\chocolatey\lib\jom\tools" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-      - uses: secondlife/action-autobuild@v5
+          "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "C:\ProgramData\chocolatey\lib\jom\tools" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Install dependencies (zlib-ng)
+        run: autobuild install -A 64
+      - name: Build, smoke test and OpenSSL test suite
+        shell: bash
+        run: autobuild build -A 64
+      - name: Package
+        run: autobuild package -A 64 --archive-format tzst
+      - name: Verify package contents
+        shell: bash
+        run: |
+          archive=$(ls *.tar.zst)
+          python -c "import sys, tarfile; names = tarfile.open(sys.argv[1], 'r:zst').getnames(); missing = [n for n in sys.argv[2:] if n not in names]; sys.exit('missing: %s' % missing if missing else 0)" \
+            "$archive" LICENSES/openssl.txt autobuild-package.xml include/openssl/provider.h \
+            $([ "${{ matrix.platform }}" = windows64 ] && echo lib/release/libcrypto.lib lib/release/libssl.lib || echo lib/release/libcrypto.a lib/release/libssl.a)
+          sha256sum "$archive" | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
         with:
-          addrsize: ${{ matrix.addrsize }}
+          name: openssl-${{ matrix.platform }}
+          path: '*.tar.zst'
+          if-no-files-found: error
+
+  # Publishes the packages when the owner pushes a tag v<VERSION.txt>.
   release:
-    needs: build
-    runs-on: [ubuntu-latest]
+    needs: package
     if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: secondlife/action-autobuild-release@v3
+      - uses: actions/checkout@v4
+      - name: Check tag matches VERSION.txt
+        run: |
+          expected="v$(tr -d '\r\n' < VERSION.txt)"
+          [ "${GITHUB_REF_NAME}" = "$expected" ] || { echo "tag ${GITHUB_REF_NAME} != $expected"; exit 1; }
+      - uses: actions/download-artifact@v4
         with:
-          public: true
+          path: dist
+          merge-multiple: true
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd dist
+          sha256sum *.tar.zst | tee SHA256SUMS.txt
+          gh release create "${GITHUB_REF_NAME}" *.tar.zst SHA256SUMS.txt \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "openssl ${GITHUB_REF_NAME#v}" \
+            --notes "OpenSSL 3.5 LTS, static, legacy provider built in (no-module). Source: openssl-3.5.9.tar.gz, SHA-256 603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a. Commit ${GITHUB_SHA}."
