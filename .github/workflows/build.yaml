@@ -11,6 +11,11 @@ env:
   AUTOBUILD_BUILD_ID: ${{ github.run_id }}
   AUTOBUILD_VSVER: "180"
   AUTOBUILD_VARIABLES_FILE: ${{ github.workspace }}/.build-variables/variables
+  # autobuild writes vcs_branch / vcs_revision / vcs_url into autobuild-package.xml
+  AUTOBUILD_VCS_INFO: "1"
+  AUTOBUILD_VCS_BRANCH: ${{ github.ref_name }}
+  AUTOBUILD_VCS_REVISION: ${{ github.sha }}
+  AUTOBUILD_VCS_URL: https://github.com/${{ github.repository }}.git
 jobs:
   package:
     strategy:
@@ -43,6 +48,13 @@ jobs:
       - name: Build, smoke test and OpenSSL test suite
         shell: bash
         run: autobuild build -A 64
+      - name: Write the build-info file
+        shell: bash
+        run: |
+          python -I scripts/buildinfo.py write --name openssl --flavour windows64 --out stage/LICENSES/openssl-buildinfo.json \
+            --upstream-version 3.5.9 --upstream-url https://github.com/openssl/openssl/releases/download/openssl-3.5.9/openssl-3.5.9.tar.gz \
+            --upstream-sha256 603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a \
+            --options 'Configure: zlib no-zlib-dynamic threads no-shared no-module (linux-x86_64; VC-WIN64A on Windows); static libcrypto/libssl, legacy provider compiled in (RC4 etc.), zlib-ng linked statically, -O release'
       - name: Package
         run: autobuild package -A 64 --archive-format tzst
       - name: Verify package contents
@@ -50,7 +62,7 @@ jobs:
         run: |
           archive=$(ls *.tar.zst)
           python -c "import io, sys, tarfile, zstandard; names = tarfile.open(fileobj=io.BytesIO(zstandard.ZstdDecompressor().decompressobj().decompress(open(sys.argv[1], 'rb').read()))).getnames(); missing = [n for n in sys.argv[2:] if n not in names]; sys.exit('missing: %s' % missing if missing else 0)" \
-            "$archive" LICENSES/openssl.txt autobuild-package.xml include/openssl/provider.h \
+            "$archive" LICENSES/openssl.txt autobuild-package.xml LICENSES/openssl-buildinfo.json include/openssl/provider.h \
             $([ "${{ matrix.platform }}" = windows64 ] && echo lib/release/libcrypto.lib lib/release/libssl.lib || echo lib/release/libcrypto.a lib/release/libssl.a)
           sha256sum "$archive" | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
@@ -59,7 +71,67 @@ jobs:
           path: '*.tar.zst'
           if-no-files-found: error
 
-  # Linux is built once, directly on the runner (ubuntu-latest), no container.
+  # Linux is built twice. linux64-lts: inside ubuntu:24.04 (glibc 2.39, GCC 14),
+  # the oldest glibc any viewer line builds with; the check step fails the job
+  # on any glibc symbol newer than 2.39. linux64: directly on the runner
+  # (ubuntu-latest, whatever its current release is), no container. Both jobs
+  # share this run's AUTOBUILD_BUILD_ID, so the LTS archive is renamed to
+  # ...-linux64-lts-<id>.tar.zst to keep the two names distinct.
+  package-linux-lts:
+    runs-on: ubuntu-latest
+    container: ubuntu:24.04
+    steps:
+      - name: Install build tools
+        shell: bash
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get -y install build-essential cmake ninja-build git python3 python3-venv python3-pip ca-certificates curl zstd perl pkg-config binutils
+          python3 -m venv /opt/ab
+          /opt/ab/bin/pip install autobuild==3.10.2 llsd zstandard
+          echo /opt/ab/bin >> "$GITHUB_PATH"
+          ldd --version 2>&1 | sed -n 1p
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: FirestormViewer/fs-build-variables
+          path: .build-variables
+      - name: Install dependencies (zlib-ng)
+        shell: bash
+        run: autobuild install -A 64
+      - name: Build, smoke test and OpenSSL test suite
+        shell: bash
+        run: autobuild build -A 64
+      - name: No glibc symbol newer than 2.39
+        shell: bash
+        run: python3 -I scripts/glibc-check.py --json glibc.json --max 2.39 --dep-dir stage/packages/lib/release stage/lib/release/libcrypto.a stage/lib/release/libssl.a
+      - name: Write the build-info file
+        shell: bash
+        run: |
+          python -I scripts/buildinfo.py write --name openssl --flavour linux64-lts --out stage/LICENSES/openssl-buildinfo.json \
+            --upstream-version 3.5.9 --upstream-url https://github.com/openssl/openssl/releases/download/openssl-3.5.9/openssl-3.5.9.tar.gz \
+            --upstream-sha256 603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a \
+            --options 'Configure: zlib no-zlib-dynamic threads no-shared no-module (linux-x86_64; VC-WIN64A on Windows); static libcrypto/libssl, legacy provider compiled in (RC4 etc.), zlib-ng linked statically, -O release' \
+            --container ubuntu:24.04 --glibc-json glibc.json
+      - name: Package
+        shell: bash
+        run: autobuild package -A 64 --archive-format tzst
+      - name: Name the archive linux64-lts
+        shell: bash
+        run: |
+          for f in *-linux64-*.tar.zst; do mv "$f" "${f/-linux64-/-linux64-lts-}"; done
+          ls -l *.tar.zst
+      - name: Verify package contents
+        shell: bash
+        run: |
+          archive=$(ls *.tar.zst)
+          python -c "import io, sys, tarfile, zstandard; names = tarfile.open(fileobj=io.BytesIO(zstandard.ZstdDecompressor().decompressobj().decompress(open(sys.argv[1], 'rb').read()))).getnames(); missing = [n for n in sys.argv[2:] if n not in names]; sys.exit('missing: %s' % missing if missing else 0)"             "$archive" LICENSES/openssl.txt autobuild-package.xml LICENSES/openssl-buildinfo.json include/openssl/provider.h lib/release/libcrypto.a lib/release/libssl.a
+          sha256sum "$archive" | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openssl-linux64-lts
+          path: '*.tar.zst'
+          if-no-files-found: error
+
   package-linux:
     runs-on: ubuntu-latest
     steps:
@@ -83,16 +155,24 @@ jobs:
       - name: Build, smoke test and OpenSSL test suite
         shell: bash
         run: autobuild build -A 64
-      - name: Package
-        run: autobuild package -A 64 --archive-format tzst
       - name: Newest glibc the archives need
         shell: bash
-        run: python3 -I scripts/glibc-check.py --dep-dir stage/packages/lib/release stage/lib/release/libcrypto.a stage/lib/release/libssl.a | tee -a "$GITHUB_STEP_SUMMARY"
+        run: python3 -I scripts/glibc-check.py --json glibc.json --dep-dir stage/packages/lib/release stage/lib/release/libcrypto.a stage/lib/release/libssl.a | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Write the build-info file
+        shell: bash
+        run: |
+          python -I scripts/buildinfo.py write --name openssl --flavour linux64 --out stage/LICENSES/openssl-buildinfo.json \
+            --upstream-version 3.5.9 --upstream-url https://github.com/openssl/openssl/releases/download/openssl-3.5.9/openssl-3.5.9.tar.gz \
+            --upstream-sha256 603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a \
+            --options 'Configure: zlib no-zlib-dynamic threads no-shared no-module (linux-x86_64; VC-WIN64A on Windows); static libcrypto/libssl, legacy provider compiled in (RC4 etc.), zlib-ng linked statically, -O release' \
+            --glibc-json glibc.json
+      - name: Package
+        run: autobuild package -A 64 --archive-format tzst
       - name: Verify package contents
         shell: bash
         run: |
           archive=$(ls *.tar.zst)
-          python -c "import io, sys, tarfile, zstandard; names = tarfile.open(fileobj=io.BytesIO(zstandard.ZstdDecompressor().decompressobj().decompress(open(sys.argv[1], 'rb').read()))).getnames(); missing = [n for n in sys.argv[2:] if n not in names]; sys.exit('missing: %s' % missing if missing else 0)"             "$archive" LICENSES/openssl.txt autobuild-package.xml include/openssl/provider.h lib/release/libcrypto.a lib/release/libssl.a
+          python -c "import io, sys, tarfile, zstandard; names = tarfile.open(fileobj=io.BytesIO(zstandard.ZstdDecompressor().decompressobj().decompress(open(sys.argv[1], 'rb').read()))).getnames(); missing = [n for n in sys.argv[2:] if n not in names]; sys.exit('missing: %s' % missing if missing else 0)"             "$archive" LICENSES/openssl.txt autobuild-package.xml LICENSES/openssl-buildinfo.json include/openssl/provider.h lib/release/libcrypto.a lib/release/libssl.a
           sha256sum "$archive" | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
@@ -102,7 +182,7 @@ jobs:
 
   # Publishes the packages when the owner pushes a tag v<VERSION.txt>.
   release:
-    needs: [package, package-linux]
+    needs: [package, package-linux-lts, package-linux]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -117,13 +197,20 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: python -m pip install zstandard
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
+          INTRO: 'OpenSSL 3.5 LTS, static, legacy provider built in (no-module). Source: openssl-3.5.9.tar.gz, SHA-256 603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a. Commit ${{ github.sha }}.'
         run: |
           cd dist
           sha256sum *.tar.zst | tee SHA256SUMS.txt
+          python -I ../scripts/buildinfo.py notes . --intro "$INTRO" > ../NOTES.md
+          cat ../NOTES.md >> "$GITHUB_STEP_SUMMARY"
           gh release create "${GITHUB_REF_NAME}" *.tar.zst SHA256SUMS.txt \
             --repo "${GITHUB_REPOSITORY}" \
             --title "openssl ${GITHUB_REF_NAME#v}" \
-            --notes "OpenSSL 3.5 LTS, static, legacy provider built in (no-module). Source: openssl-3.5.9.tar.gz, SHA-256 603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a. Commit ${GITHUB_SHA}."
+            --notes-file ../NOTES.md

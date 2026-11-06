@@ -114,6 +114,7 @@
           <array>
             <string>include/openssl/*.h</string>
             <string>LICENSES/openssl.txt</string>
+            <string>LICENSES/openssl-buildinfo.json</string>
           </array>
           <key>build_directory</key>
           <string>stage</string>

@@ -7,7 +7,8 @@ themselves, by the dependency archives (--dep-dir), by the compiler runtime
 or by this system's libc, libm, libpthread, libdl, librt, libstdc++ and
 libgcc_s.  For a symbol taken from libc/libm/... the default GLIBC_ version
 is the one a new link binds to; the maximum is the glibc the archive needs.
-With --max X.Y the check fails when that maximum is newer than X.Y.
+With --max X.Y the check fails when that maximum is newer than X.Y;
+with --json FILE the result is also written there (for the build-info file).
 """
 import argparse
 import glob
@@ -67,6 +68,7 @@ def shared_defs(path):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--max")
+    ap.add_argument("--json", help="write the result to this file")
     ap.add_argument("--dep-dir", action="append", default=[])
     ap.add_argument("archives", nargs="+")
     a = ap.parse_args()
@@ -113,6 +115,11 @@ def main():
         print("needs glibc %s, newer than %s" % (".".join(map(str, top)), a.max),
               file=sys.stderr)
         bad = True
+    if a.json:
+        import json
+        with open(a.json, "w") as f:
+            json.dump({"newest_glibc": ".".join(map(str, top)), "symbol": top_sym,
+                       "limit": a.max, "unresolved": missing, "archives": a.archives}, f)
     sys.exit(1 if bad else 0)
 
 
