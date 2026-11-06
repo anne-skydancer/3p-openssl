@@ -87,8 +87,8 @@ def write(a):
                     osr[k] = v.strip('"')
         except OSError:
             pass
-        host = "ubuntu:24.04 container on an ubuntu-latest runner" if a.container else \
-            "ubuntu-latest runner (no container), image %s %s" % (env.get("ImageOS", "?"), env.get("ImageVersion", "?"))
+        host = "ubuntu:24.04 container on a GitHub ubuntu-latest runner (host image %s %s)" % (env.get("ImageOS", "?"), env.get("ImageVersion", "?")) if a.container else \
+            "GitHub runner %s (no container), image %s %s" % (a.runner, env.get("ImageOS", "?"), env.get("ImageVersion", "?"))
         info["build_os"] = {"description": host, "os_release": osr.get("PRETTY_NAME", ""),
                             "container_image": a.container or None,
                             "glibc_version": platform.libc_ver()[1] or first_line(sh("ldd", "--version")),
@@ -155,6 +155,7 @@ def main():
     w.add_argument("--upstream-sha256", required=True)
     w.add_argument("--options", required=True)
     w.add_argument("--container")
+    w.add_argument("--runner", default="ubuntu-26.04")
     w.add_argument("--glibc-json")
     n = sub.add_parser("notes")
     n.add_argument("dir")

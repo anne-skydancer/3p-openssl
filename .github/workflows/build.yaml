@@ -74,7 +74,7 @@ jobs:
   # Linux is built twice. linux64-lts: inside ubuntu:24.04 (glibc 2.39, GCC 14),
   # the oldest glibc any viewer line builds with; the check step fails the job
   # on any glibc symbol newer than 2.39. linux64: directly on the runner
-  # (ubuntu-latest, whatever its current release is), no container. Both jobs
+  # (ubuntu-26.04, explicitly: ubuntu-latest is still 24.04), no container. Both jobs
   # share this run's AUTOBUILD_BUILD_ID, so the LTS archive is renamed to
   # ...-linux64-lts-<id>.tar.zst to keep the two names distinct.
   package-linux-lts:
@@ -135,7 +135,7 @@ jobs:
           if-no-files-found: error
 
   package-linux:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
