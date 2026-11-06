@@ -95,6 +95,8 @@ jobs:
         with:
           repository: FirestormViewer/fs-build-variables
           path: .build-variables
+      - name: Trust the workspace (autobuild reads the git state in the container)
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Install dependencies (zlib-ng)
         shell: bash
         run: autobuild install -A 64
